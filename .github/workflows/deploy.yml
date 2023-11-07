@@ -1,0 +1,76 @@
+name: Deploy CatGPT
+
+on:
+  push:
+    branches: [ develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  APP_IMAGE_TAG: cr.yandex/${{ secrets.YC_CR_ID }}/catgpt:latest
+  APP_ROOT: ./catgpt
+  TF_ROOT: ./terraform
+
+jobs:
+  ci:
+    name: Build
+    runs-on: ubuntu-latest
+    environment: STAND
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Setup YC CLI
+        run: |
+          curl https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -a
+          cp $HOME/yandex-cloud/bin/yc /usr/local/bin/
+          echo "${{ secrets.YC_CLI_CONFIG }}" > $HOME/.config/yandex-cloud/config.yaml
+          yc container registry configure-docker
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.APP_ROOT }}
+          file: ${{ env.APP_ROOT }}/Dockerfile
+          push: true
+          tags: ${{ env.APP_IMAGE_TAG }}
+  cd:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: STAND
+    needs: [ ci ]
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Init
+        run: |
+          terraform version
+          cd ${{ env.TF_ROOT }} && echo '${{ secrets.YC_SA_KEY }}' > sa-key.json
+          terraform init \
+            -backend-config "bucket=${{ secrets.TF_VAR_S3_BUCKET }}" \
+            -backend-config "key=${{ secrets.TF_VAR_S3_KEY }}" \
+            -backend-config "access_key=${{ secrets.TF_VAR_S3_ACCESS_KEY }}" \
+            -backend-config "secret_key=${{ secrets.TF_VAR_S3_SECRET_KEY }}"
+
+      - name: Plan
+        run: |
+          terraform version
+          cd ${{ env.TF_ROOT }}
+          terraform validate
+          terraform plan \
+            -var TF_VAR_FOLDER_ID="${{ secrets.TF_VAR_FOLDER_ID }}" \
+            -var TF_VAR_APP_IMAGE_TAG="${{ env.APP_IMAGE_TAG }}" \
+            -var TF_VAR_SSH_PUB="${{ secrets.TF_VAR_SSH_PUB }}"
+
+      - name: Deploy
+        run: |
+          terraform version
+          cd ${{ env.TF_ROOT }}
+          terraform apply --auto-approve \
+            -var TF_VAR_FOLDER_ID="${{ secrets.TF_VAR_FOLDER_ID }}" \
+            -var TF_VAR_APP_IMAGE_TAG="${{ env.APP_IMAGE_TAG }}" \
+            -var TF_VAR_SSH_PUB="${{ secrets.TF_VAR_SSH_PUB }}"
+
+      - name: Print Info
+        run: echo "Deployed at https://app.example.com/"
